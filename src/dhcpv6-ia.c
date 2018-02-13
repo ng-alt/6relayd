@@ -61,7 +61,12 @@ int dhcpv6_init_ia(const struct relayd_config *relayd_config, int dhcpv6_socket)
 	config = relayd_config;
 	socket_fd = dhcpv6_socket;
 
+#if defined(TFD_CLOEXEC) && defined(TFD_NONBLOCK)
 	reconf_event.socket = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+#else
+	reconf_event.socket = timerfd_create(CLOCK_MONOTONIC, 0);
+	reconf_event.socket = fflags(reconf_event.socket, O_CLOEXEC | O_NONBLOCK);
+#endif
 	if (reconf_event.socket < 0) {
 		syslog(LOG_ERR, "Failed to create timer: %s", strerror(errno));
 		return -1;
@@ -128,14 +133,6 @@ int dhcpv6_init_ia(const struct relayd_config *relayd_config, int dhcpv6_socket)
 	}
 
 	return 0;
-}
-
-
-static time_t monotonic_time(void)
-{
-	struct timespec ts;
-	syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &ts);
-	return ts.tv_sec;
 }
 
 
@@ -206,7 +203,7 @@ static int send_reconf(struct relayd_interface *iface, struct assignment *assign
 static void write_statefile(void)
 {
 	if (config->dhcpv6_statefile) {
-		time_t now = monotonic_time(), wall_time = time(NULL);
+		time_t now = relayd_monotonic_time(), wall_time = time(NULL);
 		int fd = open(config->dhcpv6_statefile, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
 		if (fd < 0) {
 			return;
@@ -290,7 +287,7 @@ static void apply_lease(struct relayd_interface *iface, struct assignment *a, bo
 	for (size_t i = 0; i < iface->pd_addr_len; ++i) {
 		struct in6_addr prefix = iface->pd_addr[i].addr;
 		prefix.s6_addr32[1] |= htonl(a->assigned);
-		relayd_setup_route(&prefix, a->length, iface, &a->peer.sin6_addr, add);
+		relayd_setup_route(&prefix, a->length, iface, &a->peer.sin6_addr, 1024, add);
 	}
 }
 
@@ -393,7 +390,7 @@ static void update(struct relayd_interface *iface)
 
 	qsort(addr, len, sizeof(*addr), prefixcmp);
 
-	time_t now = monotonic_time();
+	time_t now = relayd_monotonic_time();
 	int minprefix = -1;
 
 	for (int i = 0; i < len; ++i) {
@@ -479,7 +476,7 @@ static void reconf_timer(struct relayd_event *event)
 		// Avoid compiler warning
 	}
 
-	time_t now = monotonic_time();
+	time_t now = relayd_monotonic_time();
 	for (size_t i = 0; i < config->slavecount; ++i) {
 		struct relayd_interface *iface = &config->slaves[i];
 		if (iface->pd_assignments.next == NULL)
@@ -519,7 +516,7 @@ static size_t append_reply(uint8_t *buf, size_t buflen, uint16_t status,
 
 	struct dhcpv6_ia_hdr out = {ia->type, 0, ia->iaid, 0, 0};
 	size_t datalen = sizeof(out);
-	time_t now = monotonic_time();
+	time_t now = relayd_monotonic_time();
 
 	if (status) {
 		struct __attribute__((packed)) {
@@ -692,7 +689,7 @@ static size_t append_reply(uint8_t *buf, size_t buflen, uint16_t status,
 size_t dhcpv6_handle_ia(uint8_t *buf, size_t buflen, struct relayd_interface *iface,
 		const struct sockaddr_in6 *addr, const void *data, const uint8_t *end)
 {
-	time_t now = monotonic_time();
+	time_t now = relayd_monotonic_time();
 	size_t response_len = 0;
 	const struct dhcpv6_client_header *hdr = data;
 	uint8_t *start = (uint8_t*)&hdr[1], *odata;
